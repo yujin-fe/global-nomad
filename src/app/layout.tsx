@@ -29,6 +29,13 @@ export default function RootLayout({
 }) {
   return (
     <html lang="ko" className={notoSansKR.variable}>
+      <head>
+        {/* kakao logout SDK */}
+        <Script
+          src="https://developers.kakao.com/sdk/js/kakao.min.js"
+          strategy="beforeInteractive"
+        />
+      </head>
       <body className={notoSansKR.className}>
         <QueryProvider>
           <ModalProvider>
