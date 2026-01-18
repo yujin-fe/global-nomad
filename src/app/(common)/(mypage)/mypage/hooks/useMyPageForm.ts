@@ -1,117 +1,143 @@
+import { useQueryClient } from '@tanstack/react-query';
 import { useRouter } from 'next/navigation';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect } from 'react';
 
-import { FormData, FormErrors } from './useMyPageFormTypes';
-import { createUpdatePayload, isUnauthorizedError } from './useMypageFormUtils';
-import { validateForm } from './useMyPageFormValidators';
+
+import { useProfileImageContext } from '../context/ProfileImageContext';
+
+import { useErrorHandler } from './useErrorHandler';
+import { useFormState } from './useFormState';
+import { createUpdatePayload } from './useMypageFormUtils';
 import { useGetMyInfo, useUpdateMyInfo } from './useUser';
 
+import { uploadProfileImage } from '@/api/users';
 import { useToast } from '@/components/toast/useToast';
 import { getApiErrorMessage } from '@/util/error';
+
+// 에러 타입 체크 함수
+function isUnauthorizedError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') {
+    return false;
+  }
+  
+  if (!('response' in error)) {
+    return false;
+  }
+  
+  const errorWithResponse = error as { response?: { status?: number } };
+  return errorWithResponse.response?.status === 401;
+}
 
 /**
  * 마이페이지 폼 관리 Hook
  * - 사용자 정보 조회 및 수정
  * - 폼 유효성 검사
  * - 비밀번호 선택적 업데이트
+ * - 프로필 이미지 업로드
  */
 export function useMyPageForm() {
+  const queryClient = useQueryClient();
+  const { handleError, handleImageUploadError, handleProfileUpdateError } =
+    useErrorHandler();
   const router = useRouter();
   const toast = useToast();
 
-  // React Query: 사용자 정보 조회
   const {
     data: userData,
     isLoading: isInitialLoading,
     error: fetchError,
   } = useGetMyInfo();
-
-  // React Query: 사용자 정보 수정
   const { mutateAsync: updateProfile, isPending: isLoading } =
     useUpdateMyInfo();
 
-  // 폼 상태 관리
-  const [formData, setFormData] = useState<FormData>({
-    nickname: '',
-    email: '',
-    password: '',
-    passwordConfirm: '',
-  });
+  const {
+    formData,
+    errors,
+    handleChange,
+    updateFormData,
+    resetPasswordFields,
+    validate,
+  } = useFormState();
 
-  const [errors, setErrors] = useState<FormErrors>({
-    nickname: '',
-    email: '',
-    password: '',
-    passwordConfirm: '',
-  });
+  // Context에서 프로필 이미지 상태 가져오기
+  const {
+    profileImage,
+    profileImagePreview,
+    handleImageChange,
+    resetImage,
+    updatePreview,
+  } = useProfileImageContext();
 
   // 사용자 정보 동기화
   useEffect(() => {
-    if (userData) {
-      setFormData((prev) => ({
-        ...prev,
-        nickname: userData.nickname,
-        email: userData.email,
-      }));
-    }
-  }, [userData]);
+    if (!userData) return;
 
-  // 에러 처리
+    updateFormData({
+      nickname: userData.nickname,
+      email: userData.email,
+    });
+  }, [userData, updateFormData]);
+
+  // 초기 로딩 에러 처리
   useEffect(() => {
-    if (fetchError) {
-      console.error('사용자 정보 로딩 실패:', fetchError);
-      if (isUnauthorizedError(fetchError)) {
-        toast.warning('로그인이 필요합니다.');
-        router.push('/login');
-      }
+    if (!fetchError) return;
+    
+    console.error('사용자 정보 로딩 실패:', fetchError);
+    
+    if (isUnauthorizedError(fetchError)) {
+      toast.warning('로그인이 필요합니다.');
+      router.push('/login');
+    } else {
+      handleError(fetchError);
     }
-  }, [fetchError, router]);
+  }, [fetchError, handleError, toast, router]);
 
-  /**
-   * 입력 필드 변경 핸들러
-   */
-  const handleChange = (field: keyof FormData) => {
-    return (value: string) => {
-      setFormData((prev) => ({
-        ...prev,
-        [field]: value,
-      }));
-      // 입력 시 해당 필드 에러 초기화
-      if (errors[field]) {
-        setErrors((prev) => ({
-          ...prev,
-          [field]: '',
-        }));
-      }
-    };
-  };
+  const invalidateUserQueries = useCallback(async () => {
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ['user', 'me'] }),
+      queryClient.invalidateQueries({ queryKey: ['user'] }),
+    ]);
+  }, [queryClient]);
 
-  /**
-   * 폼 유효성 검사
-   */
-  const validate = () => {
-    const { errors: newErrors, isValid } = validateForm(formData);
-    setErrors(newErrors);
-    return isValid;
-  };
-
-  /**
-   * 폼 제출 핸들러
-   */
-  const handleSubmit = async () => {
+  const handleSubmit = useCallback(async () => {
     if (!validate()) return;
 
     try {
-      const payload = createUpdatePayload(formData);
-      await updateProfile(payload);
-      toast.success('저장되었습니다!');
+      let uploadedImageUrl: string | undefined;
 
-      // 비밀번호 필드 초기화
-      setFormData((prev) => ({
-        ...prev,
-        password: '',
-        passwordConfirm: '',
-      }));
+      // 이미지 업로드 처리
+      if (profileImage) {
+        try {
+          const imageResult = await uploadProfileImage(profileImage);
+          uploadedImageUrl = imageResult.profileImageUrl;
+        } catch (error) {
+          handleImageUploadError(error);
+          return;
+        }
+      }
+
+      const payload = createUpdatePayload(formData);
+
+      if (uploadedImageUrl) {
+        payload.profileImageUrl = uploadedImageUrl;
+      }
+
+      // 프로필 업데이트 처리
+      try {
+        await updateProfile(payload);
+        await invalidateUserQueries();
+
+        if (uploadedImageUrl) {
+          updatePreview(uploadedImageUrl);
+        }
+
+        toast.success('저장되었습니다!');
+
+        resetPasswordFields();
+        resetImage();
+      } catch (error) {
+        handleProfileUpdateError(error);
+      }
     } catch (error: unknown) {
       console.error('저장 실패:', error);
       if (isUnauthorizedError(error)) {
@@ -122,14 +148,29 @@ export function useMyPageForm() {
       const errorMessage = getApiErrorMessage(error, '저장에 실패했습니다.');
       toast.error(errorMessage);
     }
-  };
+  }, [
+    validate,
+    profileImage,
+    formData,
+    updateProfile,
+    invalidateUserQueries,
+    updatePreview,
+    resetPasswordFields,
+    resetImage,
+    handleImageUploadError,
+    handleProfileUpdateError,
+    toast,
+    router,
+  ]);
 
   return {
     formData,
     errors,
     isLoading,
     isInitialLoading,
+    profileImagePreview,
     handleChange,
+    handleImageChange,
     handleSubmit,
   };
 }
